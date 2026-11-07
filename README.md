@@ -12,7 +12,9 @@
 | 開機 | Wake-on-LAN |
 | 其他控制 | webOS SSAP（`wss://<電視IP>:3001`，首次需在電視上按「允許」配對） |
 | YouTube 播指定影片 | SSAP 啟動 `youtube.leanback.v4` + `contentTarget`，失敗自動改 `contentId` → DIAL |
-| 依節目名稱找影片 | YouTube Data API v3（或選用 yt-dlp） |
+| 依節目名稱找影片 | YouTube Data API v3 → yt-dlp → 解析 youtube.com 搜尋頁（免 key，順序與 YouTube 上相同） |
+| 看電視畫面 | SSAP `tv/executeOneShot` 截圖（960×540 JPEG），讓 AI 代理確認是否真的在播 |
+| 找電視 | SSDP；收不到時改掃描本機 /24 網段的 3001 埠，再用 DIAL 讀 brand/model 確認 |
 
 ## 快速開始
 
@@ -24,11 +26,17 @@
 pip install -e ".[mcp]"
 ```
 
-**3. 設定並配對**（電視需開機，畫面會跳出提示，按「允許」）：
+**3. 搜尋電視並配對**（電視需開機，畫面會跳出提示，用遙控器按「允許」）：
 
 ```bash
-lgtv setup --host 192.168.1.50 --mac AA:BB:CC:DD:EE:FF --youtube-api-key <你的 key> --pair
+lgtv discover
 ```
+
+```bash
+lgtv setup --pair
+```
+
+`setup` 沒給 `--host` 時會自動搜尋區網；只找到一台就直接配對，並自動偵測電視 MAC（Wake-on-LAN 用）。也可手動指定：`lgtv setup --host 192.168.1.50 --mac AA:BB:CC:DD:EE:FF --youtube-api-key <你的 key> --pair`。
 
 **4. 試用：**
 
@@ -48,13 +56,17 @@ lgtv launch "LINE TV"
 lgtv apps
 ```
 
-其他指令：`on`、`off`、`status`、`volume 20|up|down`、`mute on|off`、`media pause`、`button HOME`、`type "文字" --enter`、`input HDMI_1`、`url <網址>`、`netflix <titleId>`、`notify "訊息"`、`screen off`。所有輸出皆為 JSON。
+```bash
+lgtv screenshot --out tv.jpg
+```
+
+其他指令：`profile --index 0 --replay <影片>`（YouTube 帳號選擇畫面）、`discover --subnet 192.168.1.0/24`、`on`、`off`、`status`、`volume 20|up|down`、`mute on|off`、`media pause`、`button HOME`、`type "文字" --enter`、`input HDMI_1`、`url <網址>`、`netflix <titleId>`、`notify "訊息"`、`screen off`。所有輸出皆為 JSON。
 
 ## 接到 AIOS
 
 ### 方式一：MCP（推薦）
 
-`lgtv-mcp` 是 stdio MCP server，提供 `tv_play_youtube`、`tv_search_youtube`、`tv_launch_app`、`tv_power`、`tv_volume` 等 14 個工具。設定範例見 [examples/mcp_config.json](examples/mcp_config.json)。AIOS 在遠端時用 `lgtv-mcp --http`，並放在 VPN 或有認證的反向代理後面。
+`lgtv-mcp` 是 stdio MCP server，提供 `tv_play_youtube`、`tv_search_youtube`、`tv_launch_app`、`tv_power`、`tv_volume`、`tv_screenshot` 等 16 個工具。設定範例見 [examples/mcp_config.json](examples/mcp_config.json)。AIOS 在遠端時用 `lgtv-mcp --http`，並放在 VPN 或有認證的反向代理後面。
 
 ### 方式二：Python API
 
@@ -62,9 +74,24 @@ lgtv apps
 from lgtv_aios import LGTVController, TVConfig
 
 async with LGTVController(TVConfig.load()) as tv:
-    await tv.play_youtube("周杰倫 演唱會")
+    res = await tv.play_youtube("TVBS新聞直播")   # 搜尋並播第一筆
+    shot = await tv.capture_screen("tv.jpg")      # 交給 AIOS 的視覺模型確認畫面
+    # 若畫面停在 YouTube「誰在觀看」：
+    await tv.youtube_select_profile(index=0)      # 選帳號並自動重播剛才的影片
     await tv.launch_app("Netflix")
 ```
+
+所有方法都回傳可 JSON 序列化的 dict，電視連不上時丟 `TVNotReachable`。
+
+### YouTube「誰在觀看」帳號畫面
+
+YouTube 每次冷啟動都可能先跳出帳號選擇畫面，**這時啟動參數裡的影片會被丟掉**，所以 `play_youtube` 回傳 `ok: true` 也不代表畫面在播。建議 AIOS 的流程是：
+
+1. `play_youtube(...)`
+2. 等 5–10 秒後 `capture_screen()`，看畫面是影片、廣告還是帳號選擇
+3. 如果是帳號選擇，呼叫 `youtube_select_profile(index)`，它會按鍵選帳號，再重送一次剛才的影片
+
+`youtube_select_profile` 只能在帳號畫面使用：影片播放中按 ENTER 會暫停或叫出控制列。
 
 ### 方式三：CLI
 
@@ -85,5 +112,18 @@ pip install -e ".[dev]" && pytest
 
 ## 現況
 
-- ✅ 以模擬電視通過端到端測試（配對、YouTube 啟動參數、退回 `contentId`、App 名稱解析、音量、按鍵）
-- ⏳ 尚未在實機 G3 驗證，待驗清單見研究報告第 8 節
+2026-11-08 在實機 **OLED65G3PSA** 上驗證：
+
+| 項目 | 結果 |
+|---|---|
+| 區網探索（SSDP、網段掃描備援） | ✅ 兩種都找得到 |
+| SSAP 配對、儲存 client-key | ✅ |
+| 依名稱搜尋 YouTube 並播第一筆（免 API key） | ✅ `lgtv youtube "TVBS新聞直播"` |
+| `contentTarget` 用 `https://www.youtube.com/tv?v=ID` 或 `v=ID` | ✅ 兩種格式都能播 |
+| YouTube 帳號選擇畫面 | ⚠️ 會吃掉影片；`youtube_select_profile()` 選帳號後重播 |
+| DIAL 播放 | ⚠️ 一定要帶 `Origin: https://www.youtube.com`（否則 403）；回 200 但實測沒切換影片，只當最後備援 |
+| 截圖 | ✅ YouTube 畫面（含廣告）可擷取 |
+| 電視 MAC 偵測 | ✅ 由 SSAP 回報有線 / Wi‑Fi 兩個 MAC |
+| Wake-on-LAN 開機、Netflix 深層連結、HDMI 切換 | ⏳ 尚未在實機測試 |
+
+模擬電視的端到端測試也涵蓋上面發現的行為（`tests/test_verified_on_g3.py`）。

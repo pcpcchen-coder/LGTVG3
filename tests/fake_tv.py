@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
 
+FAKE_JPEG = b"\xff\xd8\xff\xe0fake-capture\xff\xd9"
+
 LAUNCH_POINTS = [
     {"id": "youtube.leanback.v4", "title": "YouTube"},
     {"id": "netflix", "title": "Netflix"},
@@ -57,6 +59,10 @@ class FakeTV:
             return "response", {"returnValue": True, "soundOutput": "tv_speaker"}
         if ep == "com.webos.media/getForegroundAppInfo":
             return "response", {"returnValue": True, "foregroundAppInfo": []}
+        if ep == "com.webos.service.connectionmanager/getinfo":
+            return "response", {"returnValue": True, "wifiInfo": {"macAddress": "a8:23:fe:12:34:56"}}
+        if ep == "tv/executeOneShot":
+            return "response", {"returnValue": True, "imageUri": f"http://127.0.0.1:{self.port}/resources/abc/capture.jpg"}
         if ep == "tv/getChannelList":
             return "error", {}
         if ep == "system.launcher/launch":
@@ -103,10 +109,15 @@ class FakeTV:
         return [r["payload"] for r in self.requests if r.get("uri") == "ssap://system.launcher/launch"]
 
 
+async def _capture(_request: web.Request) -> web.Response:
+    return web.Response(body=FAKE_JPEG, content_type="image/jpeg")
+
+
 async def start_fake_tv(tv: FakeTV) -> web.AppRunner:
     app = web.Application()
     app.router.add_get("/", tv.handle)
     app.router.add_get("/input", tv.handle)
+    app.router.add_get("/resources/abc/capture.jpg", _capture)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", tv.port)

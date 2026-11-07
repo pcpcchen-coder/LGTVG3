@@ -136,3 +136,22 @@ def test_power_off_when_unreachable(cfg):
             return await ctl.power_off()
 
     assert run(main()) == {"ok": True, "already_off": True}
+
+
+def test_cli_setup_pairs_and_detects_mac(cfg, capsys):
+    from lgtv_aios import cli
+
+    async def main():
+        tv = FakeTV()
+        runner = await start_fake_tv(tv)
+        try:
+            args = cli.build_parser().parse_args(["setup", "--host", "127.0.0.1", "--pair"])
+            return await cli._run(args)
+        finally:
+            await runner.cleanup()
+
+    assert run(main()) == 0
+    saved = TVConfig.load()
+    assert saved.client_key == "FAKE-CLIENT-KEY"
+    assert saved.mac == "A8:23:FE:12:34:56"
+    assert "已自動偵測電視 MAC" in capsys.readouterr().out

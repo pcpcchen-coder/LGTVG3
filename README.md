@@ -66,7 +66,7 @@ lgtv screenshot --out tv.jpg
 
 ### 方式一：MCP（推薦）
 
-`lgtv-mcp` 是 stdio MCP server，提供 `tv_play_youtube`、`tv_search_youtube`、`tv_launch_app`、`tv_power`、`tv_volume` 等 14 個工具。設定範例見 [examples/mcp_config.json](examples/mcp_config.json)。AIOS 在遠端時用 `lgtv-mcp --http`，並放在 VPN 或有認證的反向代理後面。
+`lgtv-mcp` 是 stdio MCP server，提供 `tv_play_youtube`、`tv_search_youtube`、`tv_launch_app`、`tv_power`、`tv_volume`、`tv_screenshot` 等 16 個工具。設定範例見 [examples/mcp_config.json](examples/mcp_config.json)。AIOS 在遠端時用 `lgtv-mcp --http`，並放在 VPN 或有認證的反向代理後面。
 
 ### 方式二：Python API
 

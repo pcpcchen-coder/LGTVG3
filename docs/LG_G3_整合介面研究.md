@@ -166,7 +166,7 @@ YouTube TV app 沒有公開的「搜尋深層連結」，因此在電視外先�
 
 三種接法，依 AIOS 的能力選擇：
 
-1. **MCP（推薦）**：AIOS 若支援 Model Context Protocol，直接把 `lgtv-mcp` 加入工具伺服器。已提供 14 個工具：`tv_status`、`tv_power`、`tv_list_apps`、`tv_launch_app`、`tv_search_youtube`、`tv_play_youtube`、`tv_play_netflix`、`tv_open_url`、`tv_volume`、`tv_media`、`tv_button`、`tv_type_text`、`tv_set_input`、`tv_notify`。
+1. **MCP（推薦）**：AIOS 若支援 Model Context Protocol，直接把 `lgtv-mcp` 加入工具伺服器。已提供 16 個工具：`tv_status`、`tv_power`、`tv_list_apps`、`tv_launch_app`、`tv_search_youtube`、`tv_play_youtube`、`tv_play_netflix`、`tv_open_url`、`tv_volume`、`tv_media`、`tv_button`、`tv_type_text`、`tv_set_input`、`tv_notify`、`tv_screenshot`、`tv_youtube_select_profile`。
 2. **Python API**：`from lgtv_aios import LGTVController`，把方法包成 AIOS 的 function-calling 工具。
 3. **CLI**：`lgtv youtube "節目名稱"`，所有輸出皆為 JSON，適合以 shell 工具呼叫。
 

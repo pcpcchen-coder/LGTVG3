@@ -24,11 +24,17 @@
 pip install -e ".[mcp]"
 ```
 
-**3. 設定並配對**（電視需開機，畫面會跳出提示，按「允許」）：
+**3. 搜尋電視並配對**（電視需開機，畫面會跳出提示，用遙控器按「允許」）：
 
 ```bash
-lgtv setup --host 192.168.1.50 --mac AA:BB:CC:DD:EE:FF --youtube-api-key <你的 key> --pair
+lgtv discover
 ```
+
+```bash
+lgtv setup --pair
+```
+
+`setup` 沒給 `--host` 時會自動搜尋區網；只找到一台就直接配對，並自動偵測電視 MAC（Wake-on-LAN 用）。也可手動指定：`lgtv setup --host 192.168.1.50 --mac AA:BB:CC:DD:EE:FF --youtube-api-key <你的 key> --pair`。
 
 **4. 試用：**
 

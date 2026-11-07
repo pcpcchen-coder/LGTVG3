@@ -57,6 +57,8 @@ class FakeTV:
             return "response", {"returnValue": True, "soundOutput": "tv_speaker"}
         if ep == "com.webos.media/getForegroundAppInfo":
             return "response", {"returnValue": True, "foregroundAppInfo": []}
+        if ep == "com.webos.service.connectionmanager/getinfo":
+            return "response", {"returnValue": True, "wifiInfo": {"macAddress": "a8:23:fe:12:34:56"}}
         if ep == "tv/getChannelList":
             return "error", {}
         if ep == "system.launcher/launch":

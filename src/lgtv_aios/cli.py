@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 
+from . import discover
 from .config import TVConfig, default_config_path
 from .controller import LGTVController
 
@@ -19,6 +20,10 @@ def _print(obj) -> None:
 async def _run(args: argparse.Namespace) -> int:
     cfg = TVConfig.load()
 
+    if args.cmd == "discover":
+        _print([t.to_dict() for t in await discover.discover(args.timeout)])
+        return 0
+
     if args.cmd == "setup":
         if args.host:
             cfg.host = args.host
@@ -28,12 +33,33 @@ async def _run(args: argparse.Namespace) -> int:
             cfg.broadcast = args.broadcast
         if args.youtube_api_key:
             cfg.youtube_api_key = args.youtube_api_key
+        if not cfg.host:
+            print("未指定 --host，正在區網上搜尋 LG 電視…")
+            found = await discover.discover()
+            if len(found) != 1:
+                _print([t.to_dict() for t in found])
+                print("找到 0 台或多台電視，請用 --host <IP> 指定。" if found else
+                      "找不到電視：請確認電視已開機、與本機在同一網段，或用 --host 指定 IP。")
+                return 1
+            cfg.host = found[0].host
+            print(f"找到電視：{found[0].name or found[0].model} @ {cfg.host}")
         path = cfg.save()
         print(f"設定已儲存：{path}")
         if args.pair:
-            print("正在連線電視，請在電視畫面上按「允許」完成配對…")
+            print("正在連線電視，請在電視畫面上用遙控器按「允許」完成配對（60 秒內）…")
             async with LGTVController(cfg) as tv:
-                await tv.connect(timeout=60)
+                client = await tv.connect(timeout=60)
+                if not cfg.mac:
+                    candidates = discover.macs_from_connection_info(client.tv_info.connection)
+                    mac = discover.mac_from_arp(cfg.host)
+                    if not mac and len(candidates) == 1:
+                        mac = next(iter(candidates.values()))
+                    if mac:
+                        cfg.mac = mac
+                        cfg.save()
+                        print(f"已自動偵測電視 MAC：{mac}（Wake-on-LAN 用）")
+                    elif candidates:
+                        print(f"電視網卡 MAC：{candidates}，請用 `lgtv setup --mac <目前連線那張>` 設定")
                 _print(await tv.status())
         return 0
 
@@ -95,8 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    s = sub.add_parser("discover", help="搜尋區網上的 LG webOS 電視")
+    s.add_argument("--timeout", type=float, default=4.0)
+
     s = sub.add_parser("setup", help=f"儲存設定（{default_config_path()}）並可選擇立即配對")
-    s.add_argument("--host", help="電視 IP，例如 192.168.1.50（建議在路由器設固定 IP）")
+    s.add_argument("--host", help="電視 IP；省略時自動搜尋區網（建議在路由器設固定 IP）")
     s.add_argument("--mac", help="電視 MAC（Wake-on-LAN 用；有線/無線的 MAC 不同）")
     s.add_argument("--broadcast", help="廣播位址，例如 192.168.1.255")
     s.add_argument("--youtube-api-key", help="YouTube Data API v3 key（依節目名稱搜尋用）")

@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 from .config import TVConfig
 from .controller import LGTVController
@@ -21,6 +22,8 @@ server = MCPServer(
         "要播放 YouTube 節目時直接呼叫 tv_play_youtube，傳入網址或節目名稱即可，工具會自動開機。"
         "不確定是哪支影片時，先用 tv_search_youtube 列出候選給使用者選。"
         "開其他 app 前若不確定名稱，可先呼叫 tv_list_apps。"
+        "播放後用 tv_screenshot 看電視畫面確認；若停在 YouTube「誰在觀看」帳號畫面，"
+        "呼叫 tv_youtube_select_profile 選帳號，它會自動重播剛才的影片。"
     ),
 )
 
@@ -69,6 +72,27 @@ async def tv_search_youtube(query: str, max_results: int = 5) -> list[dict[str, 
 async def tv_play_youtube(query_or_url: str) -> dict[str, Any]:
     """在電視的 YouTube app 播放影片。可傳 YouTube 網址、11 碼影片 ID，或節目名稱（自動搜尋取第一筆）。"""
     return await _controller().play_youtube(query_or_url)
+
+
+@server.tool()
+async def tv_screenshot() -> Image:
+    """擷取電視目前畫面（960x540 JPEG），用來確認是否真的在播放、或畫面停在哪裡。"""
+    import tempfile
+
+    path = Path(tempfile.gettempdir()) / "lgtv-aios-screenshot.jpg"
+    res = await _controller().capture_screen(path)
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error", "截圖失敗"))
+    return Image(data=path.read_bytes(), format="jpeg")
+
+
+@server.tool()
+async def tv_youtube_select_profile(index: int = 0) -> dict[str, Any]:
+    """YouTube 停在「誰在觀看」帳號畫面時使用：選第 index 個帳號（0 = 最左邊），並重播上一次要播的影片。
+
+    只在截圖確認畫面是帳號選擇時呼叫；播放中呼叫會讓影片暫停。
+    """
+    return await _controller().youtube_select_profile(index)
 
 
 @server.tool()

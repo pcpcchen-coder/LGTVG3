@@ -3,11 +3,13 @@
 搜尋來源（依序）：
 1. YouTube Data API v3（需要 API key，最穩定、合規）
 2. yt-dlp 的 `ytsearchN:`（選用套件，免 key；屬非官方途徑）
+3. 直接解析 youtube.com 搜尋結果頁（免 key、免套件；非官方途徑，YouTube 改版時可能失效）
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
@@ -160,6 +162,51 @@ def _search_ytdlp_sync(query: str, max_results: int) -> list[VideoResult]:
     return out
 
 
+_INITIAL_DATA_RE = re.compile(r"var ytInitialData = (\{.*?\});</script>", re.S)
+
+
+def parse_results_page(html: str, max_results: int = 5) -> list[VideoResult]:
+    """從 youtube.com/results 頁面的 ytInitialData 取出影片（依頁面順序）。"""
+    m = _INITIAL_DATA_RE.search(html)
+    if not m:
+        return []
+    out: list[VideoResult] = []
+
+    def walk(node) -> None:
+        if len(out) >= max_results:
+            return
+        if isinstance(node, dict):
+            v = node.get("videoRenderer")
+            if isinstance(v, dict) and v.get("videoId"):
+                title = "".join(r.get("text", "") for r in v.get("title", {}).get("runs", []))
+                channel = (v.get("ownerText", {}).get("runs") or [{}])[0].get("text", "")
+                badges = json.dumps(v.get("badges", []), ensure_ascii=False)
+                out.append(VideoResult(video_id=v["videoId"], title=title, channel=channel, is_live="LIVE" in badges))
+                return
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(json.loads(m.group(1)))
+    return out
+
+
+async def search_web(query: str, max_results: int = 5, hl: str = "zh-TW", gl: str = "TW") -> list[VideoResult]:
+    """免 API key：抓 youtube.com 搜尋結果頁，順序與在 YouTube 上搜尋看到的一致。"""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://www.youtube.com/results",
+            params={"search_query": query, "hl": hl, "gl": gl},
+            headers={"User-Agent": "Mozilla/5.0", "Accept-Language": hl},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            html = await resp.text()
+    return parse_results_page(html, max_results)
+
+
 async def search(
     query: str,
     api_key: str | None = None,
@@ -172,8 +219,6 @@ async def search(
         return await search_data_api(query, api_key, max_results, region_code, relevance_language)
     try:
         import yt_dlp  # noqa: F401  # type: ignore[import-not-found]
-    except ImportError as err:
-        raise RuntimeError(
-            "無法搜尋 YouTube：請設定 YOUTUBE_API_KEY，或安裝選用套件 `pip install yt-dlp`。"
-        ) from err
+    except ImportError:
+        return await search_web(query, max_results, gl=region_code)
     return await asyncio.to_thread(_search_ytdlp_sync, query, max_results)

@@ -8,7 +8,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+import aiohttp
 
 from aiowebostv import WebOsClient
 from aiowebostv.buttons import BUTTONS
@@ -22,6 +26,14 @@ _LOGGER = logging.getLogger(__name__)
 
 INSERT_TEXT = "com.webos.service.ime/insertText"
 SEND_ENTER = "com.webos.service.ime/sendEnterKey"
+SCREEN_CAPTURE = "tv/executeOneShot"
+FOREGROUND_APP = "com.webos.applicationManager/getForegroundAppInfo"
+
+
+_PROFILE_NOTE = (
+    "若電視停在 YouTube「誰在觀看」帳號畫面，影片不會播放："
+    "請呼叫 youtube_select_profile()，或用 capture_screen() 看畫面確認。"
+)
 
 
 class TVNotReachable(RuntimeError):
@@ -36,6 +48,7 @@ class LGTVController:
         self._client_factory = client_factory
         self._client: WebOsClient | None = None
         self._lock = asyncio.Lock()
+        self._last_youtube: youtube.YouTubeTarget | None = None
 
     # ------------------------------------------------------------------ 連線
     async def __aenter__(self) -> "LGTVController":
@@ -142,6 +155,35 @@ class LGTVController:
             "webos_version": client.tv_info.software.get("major_ver"),
         }
 
+    async def foreground_app(self) -> str | None:
+        """目前在前景的 app id（例如 youtube.leanback.v4）。"""
+        client = await self.connect()
+        res = await client.request(FOREGROUND_APP)
+        return (res or {}).get("appId")
+
+    async def capture_screen(self, path: str | Path | None = None) -> dict[str, Any]:
+        """擷取電視目前畫面（960x540 JPEG）並存檔，讓 AI 代理能「看」電視。
+
+        實機 G3 可擷取 YouTube 等串流 app 的畫面；HDMI / 受 DRM 保護的內容可能是黑畫面。
+        """
+        client = await self.connect()
+        res = await client.request(
+            SCREEN_CAPTURE, {"path": "/tmp/capture.png", "method": "DISPLAY", "format": "PNG"}
+        )
+        uri = (res or {}).get("imageUri")
+        if not uri:
+            return {"ok": False, "error": "電視沒有回傳截圖網址", "response": res}
+        if path is None:
+            path = Path.cwd() / f"tv-{datetime.now():%Y%m%d-%H%M%S}.jpg"
+        path = Path(path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # 截圖由電視的 https://<IP>:3001 提供，憑證是電視自簽，只在區網內連線，故不驗證憑證
+        async with aiohttp.ClientSession() as session:
+            async with session.get(uri, ssl=False, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                resp.raise_for_status()
+                path.write_bytes(await resp.read())
+        return {"ok": True, "path": str(path), "bytes": path.stat().st_size}
+
     async def list_apps(self) -> list[dict[str, str]]:
         client = await self.connect()
         apps = client.tv_state.apps or {a["id"]: a for a in (await client.get_apps() or [])}
@@ -203,13 +245,14 @@ class LGTVController:
             picked = results[0]
             target = youtube.YouTubeTarget(video_id=picked["video_id"])
 
+        self._last_youtube = target
         await self.ensure_on()
         errors: list[str] = []
         if method in ("auto", "ssap"):
             try:
                 client = await self.connect()
                 await client.launch_app_with_params(YOUTUBE_APP_ID, target.launch_params())
-                return {"ok": True, "method": "ssap", "tv_url": target.tv_url(), "picked": picked}
+                return {"ok": True, "method": "ssap", "tv_url": target.tv_url(), "picked": picked, "note": _PROFILE_NOTE}
             except WebOsTvCommandError as err:
                 errors.append(f"ssap: {err}")
                 try:
@@ -221,11 +264,34 @@ class LGTVController:
             try:
                 res = await dial.launch_youtube(self.config.host, target.video_id)
                 if res["status"] in (200, 201):
-                    return {"ok": True, "method": "dial", "dial": res, "picked": picked}
+                    return {
+                        "ok": True,
+                        "method": "dial",
+                        "dial": res,
+                        "picked": picked,
+                        "note": "DIAL 回 200 只代表電視收下請求，請用 capture_screen() 確認是否真的在播。",
+                    }
                 errors.append(f"dial: HTTP {res['status']}")
             except Exception as err:  # noqa: BLE001 - 回報給代理即可
                 errors.append(f"dial: {err}")
         return {"ok": False, "errors": errors, "picked": picked}
+
+    async def youtube_select_profile(self, index: int = 0, replay: bool = True) -> dict[str, Any]:
+        """處理 YouTube「誰在觀看」帳號選擇畫面：選第 index 個帳號（0 = 最左邊），再重播上一支影片。
+
+        帳號畫面出現時，啟動參數帶進去的影片會被丟掉，所以選完帳號要重新送一次。
+        只在畫面確實停在帳號選擇時呼叫：在播放中按 ENTER 會暫停或叫出控制列。
+        """
+        if index > 0:
+            await self.button("RIGHT", index)
+        await self.button("ENTER")
+        result: dict[str, Any] = {"ok": True, "profile_index": index}
+        if replay and self._last_youtube is not None:
+            await asyncio.sleep(3)
+            client = await self.connect()
+            await client.launch_app_with_params(YOUTUBE_APP_ID, self._last_youtube.launch_params())
+            result["replayed"] = self._last_youtube.tv_url()
+        return result
 
     # ------------------------------------------------------------------ 其他串流 / 網頁
     async def play_netflix(self, title_id: str) -> dict[str, Any]:

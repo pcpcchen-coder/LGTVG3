@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lgtv-aios"
+version = "0.1.0"
+description = "讓 AI 代理（AIOS）透過 webOS SSAP / DIAL / Wake-on-LAN 控制 LG G3 OLED 電視"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiowebostv>=0.7",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=2"]
+search = ["yt-dlp"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+lgtv = "lgtv_aios.cli:main"
+lgtv-mcp = "lgtv_aios.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

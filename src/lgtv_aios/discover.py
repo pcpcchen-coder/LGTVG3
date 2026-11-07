@@ -1,8 +1,15 @@
-"""在區網上找 LG webOS 電視（SSDP），以及查詢電視 MAC 位址（Wake-on-LAN 用）。"""
+"""在區網上找 LG webOS 電視，以及查詢電視 MAC 位址（Wake-on-LAN 用）。
+
+搜尋順序：
+1. SSDP（LG second-screen / DIAL）
+2. SSDP 沒有回應時（有些路由器或 mesh 網路會擋多播）：掃描本機所在 /24 網段的
+   SSAP 埠 3001，再用 DIAL 讀 brand / model 確認是 LG 電視。實機環境就是靠這條找到 G3。
+"""
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import socket
 import subprocess
@@ -11,6 +18,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 
 import aiohttp
+
+from . import dial
 
 SSDP_ADDR = ("239.255.255.250", 1900)
 # LG 手機 App 用來找電視的服務類型；DIAL 作為補充（部分韌體只回應其一）
@@ -86,8 +95,67 @@ def _parse_description(xml_text: str) -> dict[str, str]:
     return out
 
 
-async def discover(timeout: float = 4.0) -> list[FoundTV]:
-    """搜尋區網上的 LG webOS 電視。"""
+def local_ipv4() -> str | None:
+    """本機對外網卡的 IPv4（不會真的送出封包）。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))  # TEST-NET，只用來讓系統選路由
+            return s.getsockname()[0]
+        except OSError:
+            return None
+
+
+async def _port_open(host: str, port: int, timeout: float) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+async def scan_subnet(
+    subnet: str | None = None, port: int = 3001, timeout: float = 0.6, concurrency: int = 128
+) -> list[FoundTV]:
+    """掃描網段上開著 SSAP 埠的主機，並用 DIAL 確認是 LG 電視。
+
+    subnet 例如 "192.168.1.0/24"；省略時用本機 IP 所在的 /24。
+    """
+    if subnet is None:
+        ip = local_ipv4()
+        if not ip:
+            return []
+        subnet = str(ipaddress.ip_network(f"{ip}/24", strict=False))
+    hosts = [str(h) for h in ipaddress.ip_network(subnet, strict=False).hosts()]
+    sem = asyncio.Semaphore(concurrency)
+
+    async def probe(host: str) -> FoundTV | None:
+        async with sem:
+            if not await _port_open(host, port, timeout):
+                return None
+        info = await dial.youtube_app_info(host) or {}
+        brand = info.get("brand", "")
+        if brand and "lg" not in brand.lower():
+            return None
+        return FoundTV(host=host, model=info.get("model", ""), manufacturer=brand, server="scan:ssap")
+
+    found = await asyncio.gather(*(probe(h) for h in hosts))
+    return [tv for tv in found if tv is not None]
+
+
+async def discover(timeout: float = 4.0, scan_fallback: bool = True) -> list[FoundTV]:
+    """搜尋區網上的 LG webOS 電視；SSDP 沒結果時改掃描網段。"""
+    tvs = await _discover_ssdp(timeout)
+    if not tvs and scan_fallback:
+        tvs = await scan_subnet()
+    return sorted(tvs, key=lambda t: tuple(int(x) for x in t.host.split(".")))
+
+
+async def _discover_ssdp(timeout: float) -> list[FoundTV]:
     raw = await asyncio.to_thread(_ssdp_search, timeout)
     tvs: list[FoundTV] = []
     async with aiohttp.ClientSession() as session:
@@ -105,7 +173,7 @@ async def discover(timeout: float = 4.0) -> list[FoundTV]:
             is_lg = "lg" in tv.manufacturer.lower() or "webos" in tv.server.lower()
             if is_lg or not tv.manufacturer:
                 tvs.append(tv)
-    return sorted(tvs, key=lambda t: t.host)
+    return tvs
 
 
 def parse_arp_output(text: str, host: str) -> str | None:
@@ -118,7 +186,15 @@ def parse_arp_output(text: str, host: str) -> str | None:
 
 
 def mac_from_arp(host: str) -> str | None:
-    """從本機 ARP 表查電視「目前使用中網卡」的 MAC（需先與電視通訊過）。"""
+    """從本機 ARP 表查電視「目前使用中網卡」的 MAC。
+
+    ARP 紀錄閒置幾分鐘就會過期，所以先連一下電視的 SSAP 埠讓系統重新記錄。
+    """
+    try:
+        with socket.create_connection((host, 3001), timeout=1):
+            pass
+    except OSError:
+        pass
     try:
         with open("/proc/net/arp", encoding="utf-8") as f:  # Linux
             mac = parse_arp_output(f.read(), host)
@@ -126,13 +202,17 @@ def mac_from_arp(host: str) -> str | None:
                 return mac
     except OSError:
         pass
-    try:  # macOS / BSD / Windows
-        out = subprocess.run(["arp", "-n", host], capture_output=True, text=True, timeout=3).stdout
-        if not out.strip():
-            out = subprocess.run(["arp", "-a", host], capture_output=True, text=True, timeout=3).stdout
-        return parse_arp_output(out, host)
-    except (OSError, subprocess.SubprocessError):
-        return None
+    # macOS / BSD / Windows。macOS 有多張網卡時，ARP 紀錄會綁定網卡（ifscope），
+    # `arp -n <IP>` 回「no entry」，只有列整張表 `arp -an` 才看得到，所以逐一嘗試。
+    for cmd in (["arp", "-n", host], ["arp", "-a", host], ["arp", "-an"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        mac = parse_arp_output(out, host)
+        if mac:
+            return mac
+    return None
 
 
 def macs_from_connection_info(info: dict) -> dict[str, str]:

@@ -3,6 +3,11 @@
 流程：SSDP M-SEARCH → 取得裝置描述 LOCATION → 讀 `Application-URL` header →
 POST {Application-URL}/YouTube，body 為 `v=<video_id>`。
 LG webOS 的 Application-URL 一般在 port 36866，但請以 SSDP 結果為準。
+
+實機（OLED65G3PSA）注意事項：
+- 請求一定要帶 `Origin: https://www.youtube.com`，否則電視回 403。
+- POST 回 200 只代表電視收下請求，不保證開始播放；實測 YouTube 已在前景時
+  DIAL 不一定會切換影片，所以 DIAL 只當最後備援，播放結果請用截圖確認。
 """
 
 from __future__ import annotations
@@ -13,6 +18,8 @@ import socket
 import aiohttp
 
 DIAL_ST = "urn:dial-multiscreen-org:service:dial:1"
+YOUTUBE_ORIGIN = "https://www.youtube.com"
+DEFAULT_APP_URL = "http://{host}:36866/apps"
 SSDP_ADDR = ("239.255.255.250", 1900)
 
 
@@ -67,11 +74,41 @@ async def launch_youtube(
                 if app_url:
                     break
         if not app_url:
-            app_url = f"http://{host}:36866/apps"  # LG 常見值，最後手段
+            app_url = DEFAULT_APP_URL.format(host=host)  # LG 常見值，最後手段
         async with session.post(
             f"{app_url}/YouTube",
             data=f"v={video_id}",
-            headers={"Content-Type": "text/plain; charset=utf-8"},
+            headers={"Content-Type": "text/plain; charset=utf-8", "Origin": YOUTUBE_ORIGIN},
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             return {"status": resp.status, "app_url": app_url, "instance": resp.headers.get("Location")}
+
+
+async def youtube_app_info(host: str, application_url: str | None = None, timeout: float = 3.0) -> dict | None:
+    """讀取電視 DIAL 的 YouTube app 資訊（state、brand、model）；不是 DIAL 裝置則回傳 None。
+
+    不需配對，可用來辨識區網上的裝置是不是 LG 電視。
+    """
+    import xml.etree.ElementTree as ET
+
+    url = f"{(application_url or DEFAULT_APP_URL.format(host=host)).rstrip('/')}/YouTube"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers={"Origin": YOUTUBE_ORIGIN}, timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                text = await resp.text()
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return None
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+    out: dict[str, str] = {}
+    for el in root.iter():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag in ("name", "state", "brand", "model") and el.text and tag not in out:
+            out[tag] = el.text.strip()
+    return out

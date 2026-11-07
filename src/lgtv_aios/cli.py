@@ -21,7 +21,11 @@ async def _run(args: argparse.Namespace) -> int:
     cfg = TVConfig.load()
 
     if args.cmd == "discover":
-        _print([t.to_dict() for t in await discover.discover(args.timeout)])
+        if args.subnet:
+            found = await discover.scan_subnet(args.subnet)
+        else:
+            found = await discover.discover(args.timeout)
+        _print([t.to_dict() for t in found])
         return 0
 
     if args.cmd == "setup":
@@ -110,6 +114,12 @@ async def _run(args: argparse.Namespace) -> int:
                 res = await tv.notify(args.message)
             case "screen":
                 res = await tv.screen(args.state == "on")
+            case "screenshot":
+                res = await tv.capture_screen(args.out)
+            case "profile":
+                res = await tv.youtube_select_profile(args.index, replay=False)
+                if args.replay:
+                    res["replay"] = await tv.play_youtube(args.replay)
             case _:
                 raise SystemExit(f"未知指令 {args.cmd}")
         _print(res)
@@ -123,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("discover", help="搜尋區網上的 LG webOS 電視")
     s.add_argument("--timeout", type=float, default=4.0)
+    s.add_argument("--subnet", help="直接掃描網段，例如 192.168.1.0/24（不走 SSDP）")
 
     s = sub.add_parser("setup", help=f"儲存設定（{default_config_path()}）並可選擇立即配對")
     s.add_argument("--host", help="電視 IP；省略時自動搜尋區網（建議在路由器設固定 IP）")
@@ -185,6 +196,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("screen", help="關閉/開啟螢幕（聲音持續）")
     s.add_argument("state", choices=["on", "off"])
+
+    s = sub.add_parser("screenshot", help="擷取電視畫面存成 JPEG")
+    s.add_argument("--out", help="輸出路徑，預設為目前目錄 tv-<時間>.jpg")
+
+    s = sub.add_parser("profile", help="在 YouTube「誰在觀看」畫面選帳號")
+    s.add_argument("--index", type=int, default=0, help="第幾個帳號，0 = 最左邊")
+    s.add_argument("--replay", metavar="TARGET", help="選完帳號後要播的網址 / 影片 ID / 節目名稱")
     return p
 
 
